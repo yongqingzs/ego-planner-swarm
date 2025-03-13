@@ -5,6 +5,13 @@ PolynomialTraj PolynomialTraj::minSnapTraj(const Eigen::MatrixXd &Pos, const Eig
                                            const Eigen::Vector3d &end_vel, const Eigen::Vector3d &start_acc,
                                            const Eigen::Vector3d &end_acc, const Eigen::VectorXd &Time)
 {
+  /* 
+  接收一系列空间位置点和边界条件，生成一条由多段五阶多项式构成的轨迹，该轨迹：
+  1. 经过所有给定的路径点
+  2. 满足起点和终点的速度、加速度约束
+  3. 在相邻段之间保持速度和加速度的连续性
+  4. 最小化整条轨迹的抖动(jerk)，即加速度的导数(最小化抖动，提供平滑的加速度变化)
+  */
   int seg_num = Time.size();
   Eigen::MatrixXd poly_coeff(seg_num, 3 * 6);
   Eigen::VectorXd Px(6 * seg_num), Py(6 * seg_num), Pz(6 * seg_num);
@@ -188,6 +195,10 @@ PolynomialTraj PolynomialTraj::one_segment_traj_gen(const Eigen::Vector3d &start
                                                     const Eigen::Vector3d &end_pt, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc,
                                                     double t)
 {
+  /* 
+  生成一条连接起点和终点的单段五阶多项式轨迹，同时满足两端点的位置、速度和加速度边界条件。
+  五阶多项式具有刚好满足这六个边界条件的自由度，无需进行复杂的优化求解，可以直接通过求解线性方程组得到。
+  */
   Eigen::MatrixXd C = Eigen::MatrixXd::Zero(6, 6), Crow(1, 6);
   Eigen::VectorXd Bx(6), By(6), Bz(6);
 

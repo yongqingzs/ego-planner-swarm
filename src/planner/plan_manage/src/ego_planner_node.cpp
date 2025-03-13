@@ -11,6 +11,12 @@ int main(int argc, char **argv)
   ros::init(argc, argv, "ego_planner_node");
   ros::NodeHandle nh("~");
 
+#if EGO_PLANNER_NODE_DEBUG
+  if(ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Debug) ){
+    ros::console::notifyLoggerLevelsChanged();
+  }
+#endif
+
   EGOReplanFSM rebo_replan;
 
   rebo_replan.init(nh);

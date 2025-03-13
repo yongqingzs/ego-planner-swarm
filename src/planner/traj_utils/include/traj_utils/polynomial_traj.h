@@ -55,6 +55,12 @@ public:
     return times;
   }
 
+  void printTimes()
+  {
+    for (int i = 0; i < int(times.size()); i++)
+      std::cout << "traj.times[i]: " << times[i] << std::endl;
+  }
+
   vector<vector<double>> getCoef(int axis)
   {
     switch (axis)

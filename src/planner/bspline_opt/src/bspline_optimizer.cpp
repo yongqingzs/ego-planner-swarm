@@ -433,56 +433,76 @@ namespace ego_planner
    * But I will merge then someday.*/
   std::vector<std::pair<int, int>> BsplineOptimizer::initControlPoints(Eigen::MatrixXd &init_points, bool flag_first_init /*= true*/)
   {
+    /* 
+    功能：
+    1. 障碍物检测与分段：通过采样轨迹点，检测轨迹上哪些部分与障碍物发生碰撞
+    2. 分段轨迹识别：将轨迹分成多个安全段和碰撞段
+    3. A*路径查找：为每个碰撞段计算一条避障A*路径
+    4. 梯度方向计算：为每个控制点分配合适的梯度方向，指导后续优化过程中如何移动控制点以避开障碍物
+    5. 控制点属性设置：为每个控制点设置相关属性（基准点、方向等）
 
+    输入：
+    1. init_points：初始轨迹控制点(ctrl_pts)
+
+    输出：
+    1. segments：每个整数对表示一个已成功处理过的碰撞段的范围（起始索引和结束索引），实际没用到
+    */
     if (flag_first_init)
     {
+      // cps_是轨迹优化器内部的控制点数据结构，存储控制点位置及相关避障信息
       cps_.clearance = dist0_;
       cps_.resize(init_points.cols());
       cps_.points = init_points;
     }
 
-    /*** Segment the initial trajectory according to obstacles ***/
-    constexpr int ENOUGH_INTERVAL = 2;
-    double step_size = grid_map_->getResolution() / ((init_points.col(0) - init_points.rightCols(1)).norm() / (init_points.cols() - 1)) / 1.5;
+    /*** Segment the initial trajectory according to obstacles 
+     * 用于检测初始B样条轨迹上的点是否与膨胀后的障碍物发生碰撞
+     * 一个简化的碰撞检测方案
+     * ***/
+    constexpr int ENOUGH_INTERVAL = 2;  // 足够多的连续状态次数，用于避免噪声影响
+    double step_size = grid_map_->getResolution() / ((init_points.col(0) - init_points.rightCols(1)).norm() / (init_points.cols() - 1)) / 1.5;  // 计算沿轨迹的采样步长
     int in_id = -1, out_id = -1;
     vector<std::pair<int, int>> segment_ids;
     int same_occ_state_times = ENOUGH_INTERVAL + 1;
     bool occ, last_occ = false;
     bool flag_got_start = false, flag_got_end = false, flag_got_end_maybe = false;
     int i_end = (int)init_points.cols() - order_ - ((int)init_points.cols() - 2 * order_) / 3; // only check closed 2/3 points.
-    for (int i = order_; i <= i_end; ++i)
+    
+    // 在轨迹上采样点检测碰撞
+    for (int i = order_; i <= i_end; ++i)  // 遍历控制点
     {
-      //cout << " *" << i-1 << "*" ;
-      for (double a = 1.0; a > 0.0; a -= step_size)
+      for (double a = 1.0; a > 0.0; a -= step_size)  // 在相邻控制点间进行线性插值
       {
+        // 用于检测初始B样条轨迹上的点是否与膨胀后的障碍物发生碰撞
+        // 不是在计算轨迹曲线上的点，而是在进行一个简化的碰撞检测方案
+        // 虽然B样条曲线不会经过控制点，但它会被控制点"拉扯"，因此控制点之间的线段可以作为B样条曲线的一种空间近似
         occ = grid_map_->getInflateOccupancy(a * init_points.col(i - 1) + (1 - a) * init_points.col(i));
-        //cout << " " << occ;
-        // cout << setprecision(5);
-        // cout << (a * init_points.col(i-1) + (1-a) * init_points.col(i)).transpose() << " occ1=" << occ << endl;
-
-        if (occ && !last_occ)
+        
+        // 当前点在障碍物内(occ=true)，而上一个点在自由空间(last_occ=false)
+        if (occ && !last_occ)  // 从自由空间进入障碍物
         {
-          if (same_occ_state_times > ENOUGH_INTERVAL || i == order_)
+          if (same_occ_state_times > ENOUGH_INTERVAL || i == order_)  // 确保之前的状态是稳定的（非噪声）
           {
             in_id = i - 1;
             flag_got_start = true;
           }
           same_occ_state_times = 0;
-          flag_got_end_maybe = false; // terminate in advance
+          flag_got_end_maybe = false;  // 只有当真正进入一个稳定的障碍区域时才会被识别为碰撞起点
         }
-        else if (!occ && last_occ)
+        else if (!occ && last_occ)  // 从障碍物退出到自由空间
         {
           out_id = i;
           flag_got_end_maybe = true;
           same_occ_state_times = 0;
         }
-        else
+        else  // 当状态保持不变时（一直在障碍物内或一直在自由空间）
         {
-          ++same_occ_state_times;
+          ++same_occ_state_times;  // 用于判断状态是否稳定，防止因地图噪声导致的频繁状态切换
         }
 
         if (flag_got_end_maybe && (same_occ_state_times > ENOUGH_INTERVAL || (i == (int)init_points.cols() - order_)))
         {
+          // 在预判找到终点后，又连续检测到足够数量(ENOUGH_INTERVAL)的自由空间点 或 到达轨迹末端；才判定真正到达终点
           flag_got_end_maybe = false;
           flag_got_end = true;
         }
@@ -493,7 +513,7 @@ namespace ego_planner
         {
           flag_got_start = false;
           flag_got_end = false;
-          segment_ids.push_back(std::pair<int, int>(in_id, out_id));
+          segment_ids.push_back(std::pair<int, int>(in_id, out_id));  // 记录碰撞段的起始和终止控制点id
         }
       }
     }
@@ -507,19 +527,25 @@ namespace ego_planner
     // return in advance
     if (segment_ids.size() == 0)
     {
+      // 当初始轨迹没有与任何障碍物发生碰撞时，会触发这个提前返回机制（返回空字段）
       vector<std::pair<int, int>> blank_ret;
       return blank_ret;
     }
 
-    /*** a star search ***/
+    /*** 
+     * a star search 
+     * 后续代码会利用这些A*路径，为每个控制点计算适当的避障方向，
+     * 这些方向会作为梯度引导优化过程中控制点的移动，使最终的B样条轨迹能够平滑地绕过障碍物
+     * ***/
     vector<vector<Eigen::Vector3d>> a_star_pathes;
-    for (size_t i = 0; i < segment_ids.size(); ++i)
+    for (size_t i = 0; i < segment_ids.size(); ++i)  // 遍历所有碰撞段
     {
       //cout << "in=" << in.transpose() << " out=" << out.transpose() << endl;
+      // 提取碰撞段的起点和终点
       Eigen::Vector3d in(init_points.col(segment_ids[i].first)), out(init_points.col(segment_ids[i].second));
       if (a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ 0.1, in, out))
       {
-        a_star_pathes.push_back(a_star_->getPath());
+        a_star_pathes.push_back(a_star_->getPath());  // 为后续优化提供了一个绕过障碍物的"参考路线"
       }
       else
       {
@@ -529,7 +555,11 @@ namespace ego_planner
       }
     }
 
-    /*** calculate bounds ***/
+    /*** 
+     * calculate bounds 
+     * 计算每个碰撞段的"影响区域"——即哪些控制点需要因这个碰撞段而调整（使其不会相互干扰）
+     * 这是EGO-Planner轨迹优化的关键步骤，因为它确定了梯度方向应当如何传播
+     * ***/
     int id_low_bound, id_up_bound;
     vector<std::pair<int, int>> bounds(segment_ids.size());
     for (size_t i = 0; i < segment_ids.size(); i++)
@@ -567,13 +597,15 @@ namespace ego_planner
     //   cout << bounds[j].first << "  " << bounds[j].second << endl;
     // }
 
-    /*** Adjust segment length ***/
+    /*** Adjust segment length 
+     * 负责调整每个碰撞段的长度，确保它们包含足够多的控制点以生成有效的避障力，
+     * 同时避免不同分段之间的重叠；这是轨迹优化前的最后准备工作
+     * ***/
     vector<std::pair<int, int>> adjusted_segment_ids(segment_ids.size());
     constexpr double MINIMUM_PERCENT = 0.0; // Each segment is guaranteed to have sufficient points to generate sufficient force
     int minimum_points = round(init_points.cols() * MINIMUM_PERCENT), num_points;
     for (size_t i = 0; i < segment_ids.size(); i++)
     {
-      /*** Adjust segment length ***/
       num_points = segment_ids[i].second - segment_ids[i].first + 1;
       //cout << "i = " << i << " first = " << segment_ids[i].first << " second = " << segment_ids[i].second << endl;
       if (num_points < minimum_points)
@@ -605,7 +637,11 @@ namespace ego_planner
     // Used for return
     vector<std::pair<int, int>> final_segment_ids;
 
-    /*** Assign data to each segment ***/
+    /*** Assign data to each segment 
+     * 1. 计算控制点的避障方向：通过分析A*路径和控制点的位置关系，为每个控制点分配合适的避障梯度方向
+     * 2. 处理梯度的传播：确保所有控制点都有合理的梯度方向，即使有些点没有直接计算出梯度
+     * 3. 特殊情况处理：处理轨迹段过短的特殊情况
+     * ***/
     for (size_t i = 0; i < segment_ids.size(); i++)
     {
       // step 1

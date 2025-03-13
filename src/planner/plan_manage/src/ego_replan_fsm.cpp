@@ -1,4 +1,3 @@
-
 #include <plan_manage/ego_replan_fsm.h>
 
 namespace ego_planner
@@ -30,6 +29,7 @@ namespace ego_planner
       nh.param("fsm/waypoint" + to_string(i) + "_x", waypoints_[i][0], -1.0);
       nh.param("fsm/waypoint" + to_string(i) + "_y", waypoints_[i][1], -1.0);
       nh.param("fsm/waypoint" + to_string(i) + "_z", waypoints_[i][2], -1.0);
+      ROS_DEBUG("waypoint[%d]: %f, %f, %f", i, waypoints_[i][0], waypoints_[i][1], waypoints_[i][2]);
     }
 
     /* initialize main modules */
@@ -40,7 +40,7 @@ namespace ego_planner
     planner_manager_->setDroneIdtoOpt();
 
     /* callback */
-    exec_timer_ = nh.createTimer(ros::Duration(0.01), &EGOReplanFSM::execFSMCallback, this);
+    exec_timer_ = nh.createTimer(ros::Duration(0.01), &EGOReplanFSM::execFSMCallback, this);  // FSM的核心
     safety_timer_ = nh.createTimer(ros::Duration(0.05), &EGOReplanFSM::checkCollisionCallback, this);
 
     odom_sub_ = nh.subscribe("odom_world", 1, &EGOReplanFSM::odometryCallback, this);
@@ -56,7 +56,7 @@ namespace ego_planner
     broadcast_bspline_pub_ = nh.advertise<traj_utils::Bspline>("planning/broadcast_bspline_from_planner", 10);
     broadcast_bspline_sub_ = nh.subscribe("planning/broadcast_bspline_to_planner", 100, &EGOReplanFSM::BroadcastBsplineCallback, this, ros::TransportHints().tcpNoDelay());
 
-    bspline_pub_ = nh.advertise<traj_utils::Bspline>("planning/bspline", 10);
+    bspline_pub_ = nh.advertise<traj_utils::Bspline>("planning/bspline", 10);  // 发布B样条曲线
     data_disp_pub_ = nh.advertise<traj_utils::DataDisp>("planning/data_display", 100);
 
     if (target_type_ == TARGET_TYPE::MANUAL_TARGET)
@@ -71,12 +71,13 @@ namespace ego_planner
       int count = 0;
       while (ros::ok() && count++ < 1000)
       {
-        ros::spinOnce();
+        ros::spinOnce();  // 在循环中处理所有待处理的回调函数
         ros::Duration(0.001).sleep();
       }
 
       ROS_WARN("Waiting for trigger from [n3ctrl] from RC");
 
+      // 进入无限循环，直到满足两个条件：  have_odom_：已接收到无人机位置信息   have_trigger_：已接收到触发信号
       while (ros::ok() && (!have_odom_ || !have_trigger_))
       {
         ros::spinOnce();
@@ -157,6 +158,15 @@ namespace ego_planner
 
   void EGOReplanFSM::planNextWaypoint(const Eigen::Vector3d next_wp)
   {
+    /* 
+    被调用：
+    1. 初始化预设航点序列时：readGivenWps()函数末尾
+    2. 到达当前航点后：在execFSMCallback()函数的EXEC_TRAJ状态处理中
+    3. 手动指定目标点时：在waypointCallback()函数中 
+    */
+    planNextWaypoint_num++;
+    ROS_DEBUG("planNextWaypoint_num: %d, odom_pos: (%f, %f, %f), next_wp: (%f, %f, %f)", 
+      planNextWaypoint_num, odom_pos_[0], odom_pos_[1], odom_pos_[2], next_wp[0], next_wp[1], next_wp[2]);
     bool success = false;
     success = planner_manager_->planGlobalTraj(odom_pos_, odom_vel_, Eigen::Vector3d::Zero(), next_wp, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
@@ -164,17 +174,19 @@ namespace ego_planner
 
     if (success)
     {
-      end_pt_ = next_wp;
+      end_pt_ = next_wp;  // 设置终点为下一个航点
 
       /*** display ***/
       constexpr double step_size_t = 0.1;
       int i_end = floor(planner_manager_->global_data_.global_duration_ / step_size_t);
       vector<Eigen::Vector3d> gloabl_traj(i_end);
+      // 对全局轨迹进行采样，用于可视化
       for (int i = 0; i < i_end; i++)
       {
         gloabl_traj[i] = planner_manager_->global_data_.global_traj_.evaluate(i * step_size_t);
       }
 
+      // 设置终点速度为零，表示希望在目标点停止
       end_vel_.setZero();
       have_target_ = true;
       have_new_target_ = true;
@@ -184,6 +196,7 @@ namespace ego_planner
         changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
       else
       {
+        // 如果已在执行其他状态，需要等待状态机执行到EXEC_TRAJ状态
         while (exec_state_ != EXEC_TRAJ)
         {
           ros::spinOnce();
@@ -192,6 +205,7 @@ namespace ego_planner
         changeFSMExecState(REPLAN_TRAJ, "TRIG");
       }
 
+      // 可视化全局路径
       // visualization_->displayGoalPoint(end_pt_, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
       visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
     }
@@ -414,6 +428,7 @@ namespace ego_planner
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
+    // ROS_DEBUG("FSM: from %s to %s", state_str[pre_s].c_str(), state_str[int(new_state)].c_str());
   }
 
   std::pair<int, EGOReplanFSM::FSM_EXEC_STATE> EGOReplanFSM::timesOfConsecutiveStateCalls()
@@ -430,11 +445,42 @@ namespace ego_planner
 
   void EGOReplanFSM::execFSMCallback(const ros::TimerEvent &e)
   {
+    /* 
+    INIT
+    初始化系统
+    等待接收里程计数据
+    接收到里程计后转换到WAIT_TARGET状态
+    WAIT_TARGET
+    等待目标点和触发信号
+    可以是手动指定的目标点或预设目标点序列
+    收到目标后转换到SEQUENTIAL_START(多机)或GEN_NEW_TRAJ(单机)
+    GEN_NEW_TRAJ
+    为给定目标点生成全新轨迹
+    从当前位置到目标点进行全局规划
+    成功后转换到EXEC_TRAJ状态
+    REPLAN_TRAJ
+    基于当前轨迹进行重规划
+    保持起点和速度连续性
+    通常用于避障或应对环境变化
+    EXEC_TRAJ
+    执行当前轨迹
+    监控轨迹执行情况
+    判断是否需要重规划或切换到下一个航点
+    EMERGENCY_STOP
+    处理紧急情况
+    安全停止无人机
+    在安全情况恢复后可重新规划
+    SEQUENTIAL_START
+    多机编队模式下使用
+    确保按照无人机ID顺序规划和起飞
+    等待前序无人机轨迹信息
+    
+    */
     exec_timer_.stop(); // To avoid blockage
 
     static int fsm_num = 0;
     fsm_num++;
-    if (fsm_num == 100)
+    if (fsm_num == 100)  // 实现状态机高频和日志信息的低频
     {
       printFSMExecState();
       if (!have_odom_)
@@ -478,12 +524,31 @@ namespace ego_planner
 
     case SEQUENTIAL_START: // for swarm
     {
-      // cout << "id=" << planner_manager_->pp_.drone_id << " have_recv_pre_agent_=" << have_recv_pre_agent_ << endl;
+      /* 
+      无人机0(领航) → 无人机1 → 无人机2 → ... → 无人机N
+
+      无人机0：
+      不需等待，直接规划轨迹
+      发布轨迹到topic: /drone_0_planning/swarm_trajs
+
+      无人机1：
+      订阅并接收无人机0的轨迹
+      设置have_recv_pre_agent_ = true
+      考虑无人机0的轨迹进行避碰规划
+      将无人机0和自己的轨迹发布到topic: /drone_1_planning/swarm_trajs
+
+      无人机N：
+      订阅并接收无人机N-1的轨迹（含所有前序无人机轨迹）
+      考虑所有前序无人机轨迹进行避碰规划
+      将所有轨迹打包发布到topic: /drone_N_planning/swarm_trajs
+      */
+      
+      // 领航无人机 (drone_id <= 0)：直接进行规划，不需要等待其他无人机； 跟随无人机 (drone_id >= 1)：需要等待前序无人机的轨迹信息(have_recv_pre_agent_)
       if (planner_manager_->pp_.drone_id <= 0 || (planner_manager_->pp_.drone_id >= 1 && have_recv_pre_agent_))
       {
         if (have_odom_ && have_target_ && have_trigger_)
         {
-          bool success = planFromGlobalTraj(10); // zx-todo
+          bool success = planFromGlobalTraj(10);  // 参数10表示最多尝试10次规划
           if (success)
           {
             changeFSMExecState(EXEC_TRAJ, "FSM");
@@ -544,7 +609,15 @@ namespace ego_planner
 
     case EXEC_TRAJ:
     {
-      /* determine if need to replan */
+      /* determine if need to replan
+      负责监控轨迹执行情况，并根据执行过程中的情况决定是否需要重规划或切换到下一个航点
+      */ 
+
+      /** 1. 轨迹监控与执行
+       * 获取当前时间与轨迹开始时间的差值，计算当前执行的轨迹时刻t_cur
+       * 确保t_cur不超过轨迹总时长info->duration_
+       * 根据当前时刻评估无人机在轨迹上的当前位置pos
+       */
       LocalTrajData *info = &planner_manager_->local_data_;
       ros::Time time_now = ros::Time::now();
       double t_cur = (time_now - info->start_time_).toSec();
@@ -552,16 +625,28 @@ namespace ego_planner
 
       Eigen::Vector3d pos = info->position_traj_.evaluateDeBoorT(t_cur);
 
-      /* && (end_pt_ - pos).norm() < 0.5 */
       if ((target_type_ == TARGET_TYPE::PRESET_TARGET) &&
           (wp_id_ < waypoint_num_ - 1) &&
           (end_pt_ - pos).norm() < no_replan_thresh_)
       {
+       /** 2. 航点序列执行逻辑
+        * 当使用预设航点序列模式时，检查无人机是否已接近当前航点
+        * 如果已经接近当前航点(距离小于no_replan_thresh_)且还有后续航点，则切换到下一个航点
+        * 调用planNextWaypoint函数规划到下一个航点的轨迹
+        */
         wp_id_++;
         planNextWaypoint(wps_[wp_id_]);
       }
       else if ((local_target_pt_ - end_pt_).norm() < 1e-3) // close to the global target
       {
+       /** 3. 全局目标完成检测
+        * 当局部目标点接近全局目标点时(距离<1e-3)，判断是否达到目标
+        * 如果轨迹已接近结束(t_cur > info->duration_ - 1e-2)，表示已到达目标点：
+        * * 重置目标状态标志
+        * * 如果是预设航点模式，重置到第一个航点，重新开始规划
+        * * 切换到WAIT_TARGET状态，等待新的目标
+        * 如果距离终点尚远(end_pt_ - pos大于阈值)且已执行足够时间，触发重规划
+        */
         if (t_cur > info->duration_ - 1e-2)
         {
           have_target_ = false;
@@ -584,6 +669,10 @@ namespace ego_planner
       }
       else if (t_cur > replan_thresh_)
       {
+       /** 4. 定期重规划逻辑
+        * 当轨迹执行时间超过重规划阈值replan_thresh_时，触发重规划
+        * 这确保了无人机能定期更新规划，应对环境变化
+        */
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
 
@@ -617,15 +706,15 @@ namespace ego_planner
 
   bool EGOReplanFSM::planFromGlobalTraj(const int trial_times /*=1*/) //zx-todo
   {
-    start_pt_ = odom_pos_;
-    start_vel_ = odom_vel_;
-    start_acc_.setZero();
+    start_pt_ = odom_pos_;  // 当前无人机的位置
+    start_vel_ = odom_vel_;  // 使用当前速度odom_vel_作为初始速度
+    start_acc_.setZero();  // 将初始加速度设为零向量
 
     bool flag_random_poly_init;
-    if (timesOfConsecutiveStateCalls().first == 1)
-      flag_random_poly_init = false;
+    if (timesOfConsecutiveStateCalls().first == 1)  // 通过检查连续调用状态函数的次数决定是否使用随机多项式初始化
+      flag_random_poly_init = false;  // 使用确定性初始化，保证稳定性
     else
-      flag_random_poly_init = true;
+      flag_random_poly_init = true;  // 使用随机初始化，增加多样性，有助于跳出局部最优解
 
     for (int i = 0; i < trial_times; i++)
     {
@@ -676,14 +765,25 @@ namespace ego_planner
 
   void EGOReplanFSM::checkCollisionCallback(const ros::TimerEvent &e)
   {
-
+    /* 
+    负责实时碰撞检测的关键函数，通过定时器触发执行。它持续监控规划轨迹是否与障碍物或其他无人机轨迹发生碰撞，
+    并在发现潜在危险时触发相应的安全措施。
+    */
     LocalTrajData *info = &planner_manager_->local_data_;
     auto map = planner_manager_->grid_map_;
 
+    /** 1. 跳过检测：
+     * 系统正在等待目标点（WAIT_TARGET状态）
+     * 轨迹尚未初始化（开始时间接近零）
+     */
     if (exec_state_ == WAIT_TARGET || info->start_time_.toSec() < 1e-5)
       return;
 
-    /* ---------- check lost of depth ---------- */
+    /** 2. 传感器状态监测
+     * 检测深度传感器是否超时（可能是传感器故障）
+     * 如果深度信息丢失，立即触发紧急停止
+     * 禁用失败安全机制，因为没有深度信息无法安全重规划
+     */
     if (map->getOdomDepthTimeout())
     {
       ROS_ERROR("Depth Lost! EMERGENCY_STOP");
@@ -691,9 +791,20 @@ namespace ego_planner
       changeFSMExecState(EMERGENCY_STOP, "SAFETY");
     }
 
-    /* ---------- check trajectory ---------- */
-    constexpr double time_step = 0.01;
-    double t_cur = (ros::Time::now() - info->start_time_).toSec();
+    /** 3. 轨迹安全性检测
+     * 参数
+     * * 时间步长：0.01秒
+     * * 当前轨迹执行时间：基于起始时间计算
+     * * 当前理论位置：对应轨迹上的位置点
+     * * 安全间距：基于多机协同设置的安全距离
+     * * 全局时间：用于多机轨迹同步
+     * 循环检测未来轨迹点：
+     * * 每0.01秒采样一个点
+     * * 只检查轨迹的前2/3部分（如果当前执行时间未超过轨迹2/3点）
+     * * 对每个点检查是否与障碍物碰撞
+     */
+    constexpr double time_step = 0.01;  // 设置轨迹采样间隔为0.01秒
+    double t_cur = (ros::Time::now() - info->start_time_).toSec();  
     Eigen::Vector3d p_cur = info->position_traj_.evaluateDeBoorT(t_cur);
     const double CLEARANCE = 1.0 * planner_manager_->getSwarmClearance();
     double t_cur_global = ros::Time::now().toSec();
@@ -703,9 +814,19 @@ namespace ego_planner
       if (t_cur < t_2_3 && t >= t_2_3) // If t_cur < t_2_3, only the first 2/3 partition of the trajectory is considered valid and will get checked.
         break;
 
+      /** 4. 循环检测未来轨迹点
+       * 每0.01秒采样一个点
+       * 只检查轨迹的前2/3部分（如果当前执行时间未超过轨迹2/3点）
+       * 对每个点检查是否与障碍物碰撞
+       */
       bool occ = false;
       occ |= map->getInflateOccupancy(info->position_traj_.evaluateDeBoorT(t));
 
+      /** 5. 检查与其他无人机轨迹的碰撞
+       * 遍历所有其他无人机的轨迹
+       * 计算其他无人机在同一时刻的预测位置
+       * 检查两者距离是否小于安全间距
+       */
       for (size_t id = 0; id < planner_manager_->swarm_trajs_buf_.size(); id++)
       {
         if ((planner_manager_->swarm_trajs_buf_.at(id).drone_id != (int)id) || (planner_manager_->swarm_trajs_buf_.at(id).drone_id == planner_manager_->pp_.drone_id))
@@ -723,7 +844,12 @@ namespace ego_planner
           break;
         }
       }
-
+      
+      /** 6. 碰撞风险处理
+       * 立即重新规划：发现碰撞风险，首先尝试在当前轨迹基础上重规划
+       * 紧急停止：如果危险很近（小于emergency_time_，通常为0.8秒）且重规划失败，触发紧急停止
+       * 常规重规划：如果危险较远且重规划失败，切换到REPLAN_TRAJ状态
+       */
       if (occ)
       {
 
@@ -754,25 +880,36 @@ namespace ego_planner
 
   bool EGOReplanFSM::callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj)
   {
+    /* 
+    参数flag_use_poly_init：控制是否使用多项式初始化轨迹
+      true：生成全新的轨迹，使用多项式轨迹作为初始解
+      false：基于当前轨迹重规划，保持连续性
+    参数flag_randomPolyTraj：控制是否使用随机多项式
+      true：使用随机参数初始化，增加轨迹多样性，有助于摆脱局部最优
+      false：使用确定性初始化，确保结果可预测、可复现
+    */
 
-    getLocalTarget();
+    getLocalTarget();  // 从全局路径中提取当前规划视野内的局部目标点
 
+    // 1. 进行局部规划
+    // 传入起点状态（位置、速度、加速度）和目标点状态；是否强制使用多项式初始化；规划结果存储在planner_manager_->local_data_中
     bool plan_and_refine_success =
         planner_manager_->reboundReplan(start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_, (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj);
-    have_new_target_ = false;
+    have_new_target_ = false;  // 清除新目标点标志，表示已处理新目标
 
     cout << "refine_success=" << plan_and_refine_success << endl;
 
     if (plan_and_refine_success)
     {
-
+      // 2. 如果规划成功，将轨迹转换为ROS消息格式
       auto info = &planner_manager_->local_data_;
 
       traj_utils::Bspline bspline;
       bspline.order = 3;
       bspline.start_time = info->start_time_;
       bspline.traj_id = info->traj_id_;
-
+      
+      // 3. 填充控制点；从优化结果中提取控制点；转换为ROS消息格式
       Eigen::MatrixXd pos_pts = info->position_traj_.getControlPoint();
       bspline.pos_pts.reserve(pos_pts.cols());
       for (int i = 0; i < pos_pts.cols(); ++i)
@@ -783,7 +920,8 @@ namespace ego_planner
         pt.z = pos_pts(2, i);
         bspline.pos_pts.push_back(pt);
       }
-
+      
+      // 4. 填充节点向量
       Eigen::VectorXd knots = info->position_traj_.getKnot();
       // cout << knots.transpose() << endl;
       bspline.knots.reserve(knots.rows());
@@ -792,12 +930,12 @@ namespace ego_planner
         bspline.knots.push_back(knots(i));
       }
 
-      /* 1. publish traj to traj_server */
+      // 5. publish traj to traj_server
       bspline_pub_.publish(bspline);
 
-      /* 2. publish traj to the next drone of swarm */
+      // 6. publish traj to the next drone of swarm
 
-      /* 3. publish traj for visualization */
+      // 7. publish traj for visualization
       visualization_->displayOptimalList(info->position_traj_.get_control_points(), 0);
     }
 
@@ -893,15 +1031,24 @@ namespace ego_planner
 
   void EGOReplanFSM::getLocalTarget()
   {
-    double t;
+    /* 
+    在全局轨迹上找到一个位于当前位置前方适当距离（由规划视野planning_horizen_决定）的点作为局部规划的目标点。
+    这种方法使得无人机可以逐段执行全局路径，同时保持对障碍物的实时响应能力。
 
-    double t_step = planning_horizen_ / 20 / planner_manager_->pp_.max_vel_;
-    double dist_min = 9999, dist_min_t = 0.0;
-    for (t = planner_manager_->global_data_.last_progress_time_; t < planner_manager_->global_data_.global_duration_; t += t_step)
+    NOTE:
+    1. end_pt_为下一个航路点
+    */
+    double t;
+    double t_step = planning_horizen_ / 20 / planner_manager_->pp_.max_vel_;  // 采样步长设计为使无人机以最大速度飞行时，每步移动距离约为规划视野的1/20
+    double dist_min = 9999, dist_min_t = 0.0;  // 用于记录找到的最近点信息
+
+    // 1. 全局轨迹采样
+    for (t = planner_manager_->global_data_.last_progress_time_; t < planner_manager_->global_data_.global_duration_; t += t_step)  // last_progress_time_初始为0
     {
       Eigen::Vector3d pos_t = planner_manager_->global_data_.getPosition(t);
       double dist = (pos_t - start_pt_).norm();
 
+      // 特殊边缘情况处理：如果一开始，采样点就超出规划视野，则继续向前寻找
       if (t < planner_manager_->global_data_.last_progress_time_ + 1e-5 && dist > planning_horizen_)
       {
         // Important cornor case!
@@ -909,7 +1056,7 @@ namespace ego_planner
         {
           Eigen::Vector3d pos_t_temp = planner_manager_->global_data_.getPosition(t);
           double dist_temp = (pos_t_temp - start_pt_).norm();
-          if (dist_temp < planning_horizen_)
+          if (dist_temp < planning_horizen_)  // 直到找到一个在规划视野内的点，避免目标点过远无法规划
           {
             pos_t = pos_t_temp;
             dist = (pos_t - start_pt_).norm();
@@ -919,12 +1066,14 @@ namespace ego_planner
         }
       }
 
+      // 记录距离当前位置最近的轨迹点及其对应的时间
       if (dist < dist_min)
       {
         dist_min = dist;
         dist_min_t = t;
       }
-
+      
+      // 一旦找到距离当前位置大于等于规划视野的点，将其设为局部目标点
       if (dist >= planning_horizen_)
       {
         local_target_pt_ = pos_t;
@@ -932,18 +1081,24 @@ namespace ego_planner
         break;
       }
     }
+
+    // 2. 如果已经搜索到全局轨迹末尾还没找到合适点，则将终点设为局部目标
+    // 这确保无人机能够正确到达终点
     if (t > planner_manager_->global_data_.global_duration_) // Last global point
     {
       local_target_pt_ = end_pt_;
       planner_manager_->global_data_.last_progress_time_ = planner_manager_->global_data_.global_duration_;
     }
-
+    
+    // 3. 修正速度，确保平稳到达终点
     if ((end_pt_ - local_target_pt_).norm() < (planner_manager_->pp_.max_vel_ * planner_manager_->pp_.max_vel_) / (2 * planner_manager_->pp_.max_acc_))
     {
+      // 距离小于最小制动距离（当前点离最终点的制动距离）时，将局部目标的期望速度设为零，使其最终更接近目标点
       local_target_vel_ = Eigen::Vector3d::Zero();
     }
     else
     {
+      // 若满足制动要求，正常速度
       local_target_vel_ = planner_manager_->global_data_.getVelocity(t);
     }
   }

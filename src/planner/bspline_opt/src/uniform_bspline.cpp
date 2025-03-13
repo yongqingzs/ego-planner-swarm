@@ -60,7 +60,7 @@ namespace ego_planner
 
   Eigen::VectorXd UniformBspline::evaluateDeBoor(const double &u)
   {
-
+    /* 用于在给定参数值u处评估B样条曲线上的点 */
     double ub = min(max(u_(p_), u), u_(m_ - p_));
 
     // determine which [ui,ui+1] lay in
@@ -212,6 +212,12 @@ namespace ego_planner
                                              const vector<Eigen::Vector3d> &start_end_derivative,
                                              Eigen::MatrixXd &ctrl_pts)
   {
+    /* 
+    该函数接收一组路径点和边界条件，计算出一组B样条控制点，使得：
+      1. 生成的B样条曲线尽可能接近输入的路径点
+      2. 同时满足起点和终点的速度和加速度约束
+      3. 保持整体曲线的平滑性
+    */
     if (ts <= 0)
     {
       cout << "[B-spline]:time step error." << endl;

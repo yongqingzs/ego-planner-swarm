@@ -7,6 +7,7 @@
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/Imu.h>
 #include <ros/ros.h>
+#include <ros/package.h>
 #include <std_msgs/Empty.h>
 #include <vector>
 #include <visualization_msgs/Marker.h>
@@ -19,6 +20,8 @@
 #include <traj_utils/DataDisp.h>
 #include <plan_manage/planner_manager.h>
 #include <traj_utils/planning_visualization.h>
+
+#define EGO_PLANNER_NODE_DEBUG 1
 
 using std::vector;
 
@@ -42,9 +45,9 @@ namespace ego_planner
     };
     enum TARGET_TYPE
     {
-      MANUAL_TARGET = 1,
-      PRESET_TARGET = 2,
-      REFENCE_PATH = 3
+      MANUAL_TARGET = 1,  // 手动指定目标点
+      PRESET_TARGET = 2,  // 预设目标点序列
+      REFENCE_PATH = 3  // 参考路径跟踪
     };
 
     /* planning utils */
@@ -62,6 +65,9 @@ namespace ego_planner
     double emergency_time_;
     bool flag_realworld_experiment_;
     bool enable_fail_safe_;
+
+    /* for debug */
+    int planNextWaypoint_num = 0;
 
     /* planning data */
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
